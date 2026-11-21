@@ -1,0 +1,41 @@
+[package]
+name = "statkeel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Blazing-fast, agent-first (DX + AX) Rust EDA data profiler, cross-source join checker, and live SQL query trust auditor."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/robertguss/statkeel"
+homepage = "https://github.com/robertguss/statkeel"
+keywords = ["data-profiling", "eda", "sql", "postgres", "data-quality"]
+categories = ["command-line-utilities", "development-tools", "database"]
+
+[features]
+default = []
+# Statically vendor OpenSSL on Linux for portable manylinux wheels / release binaries.
+vendored-tls = ["native-tls/vendored"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+csv = "1.4"
+indexmap = { version = "2.14", features = ["serde"] }
+native-tls = "0.2"
+owo-colors = { version = "4.4", features = ["supports-colors"] }
+parquet = { version = "60.1", default-features = false, features = ["snap", "flate2-rust_backend", "zstd"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
+postgres-native-tls = "0.5"
+regex = "1.13"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"
+sqlparser = "0.64"
+thiserror = "2.0"
+toml = "1.2"
+url = "2.5"
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+tempfile = "3.27"

@@ -1,0 +1,7 @@
+/target
+*.whl
+*.tar.gz
+dist/
+.DS_Store
+*.html
+!examples/**/*.html

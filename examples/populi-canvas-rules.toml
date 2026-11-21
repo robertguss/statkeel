@@ -1,0 +1,23 @@
+# Example domain guardrails for Populi SIS <-> Canvas LMS analytics.
+# Pass via: statkeel audit query.sql --db "$DATABASE_URL" --rules examples/populi-canvas-rules.toml
+
+[[table_rules]]
+table = "canvas.enrollments"
+required_filters = ["workflow_state", "type"]
+severity = "high"
+reason = "Canvas enrollments contain deleted/inactive rows alongside Teacher, Observer, and Test Student roles."
+fix_hint = "Filter e.workflow_state = 'active' AND e.type = 'StudentEnrollment' (or explicitly filter intended states/roles)."
+
+[[table_rules]]
+table = "canvas.pseudonyms"
+required_filters = ["workflow_state"]
+severity = "medium"
+reason = "Users can have deleted or multiple login pseudonyms causing silent row fan-out."
+fix_hint = "Filter workflow_state = 'active' and deduplicate by sis_user_id in a CTE before joining."
+
+[[table_rules]]
+table = "canvas.courses"
+required_filters = ["workflow_state"]
+severity = "medium"
+reason = "Canvas courses include deleted and unpublished blueprint/sandbox shells."
+fix_hint = "Filter workflow_state IN ('available', 'completed') unless intentionally inspecting unpublished courses."

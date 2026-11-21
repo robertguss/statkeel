@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.10,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "statkeel"
+dynamic = ["version"]
+description = "Blazing-fast, agent-first (DX + AX) Rust EDA data profiler, cross-source join checker, and live SQL query trust auditor."
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Robert Guss" }]
+requires-python = ">=3.9"
+keywords = ["data-profiling", "eda", "pandas-profiling", "sql", "postgres", "data-quality", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+[project.urls]
+Homepage = "https://github.com/robertguss/statkeel"
+Repository = "https://github.com/robertguss/statkeel"
+Issues = "https://github.com/robertguss/statkeel/issues"
+
+[tool.maturin]
+bindings = "bin"
+features = ["vendored-tls"]
+compatibility = "pypi"
+strip = true
