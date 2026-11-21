@@ -1,4 +1,5 @@
 use crate::audit::{AuditReport, FindingSeverity};
+use crate::compare::{ColumnComparison, CompareReport, DualHistBin};
 use crate::join::JoinReport;
 use crate::profile::{AlertSeverity, ColumnProfile, DatasetProfile, HistogramBin};
 
@@ -510,6 +511,247 @@ pub fn render_audit_html(r: &AuditReport) -> String {
     }
 
     wrap_html("statkeel Query Trust Receipt", &body)
+}
+
+pub fn render_compare_html(r: &CompareReport) -> String {
+    let v_cls = match r.verdict.as_str() {
+        "FAIL" => "b-fail",
+        "DRIFT_DETECTED" => "b-high",
+        "LOW_DRIFT" => "b-med",
+        _ => "b-pass",
+    };
+    let mut body = format!(
+        "<header><div><h1>⚓ statkeel Compare — {} vs {}</h1><div class=\"meta\">Verdict: <span class=\"badge {v_cls}\">{}</span> · Max KS: {:.3} · Max TVD: {:.3}</div></div><button class=\"btn\" onclick=\"toggleTheme()\">Toggle Light/Dark</button></header>",
+        esc(&r.baseline_name),
+        esc(&r.candidate_name),
+        esc(&r.verdict),
+        r.max_ks,
+        r.max_tvd
+    );
+
+    let row_pct_str = r
+        .row_delta_pct
+        .map(|p| format!(" ({p:+.1}%)"))
+        .unwrap_or_default();
+    body.push_str("<div class=\"kpis\">");
+    body.push_str(&kpi(
+        "Rows (Base → Cand)",
+        &format!(
+            "{} → {} ({:+}{row_pct_str})",
+            r.baseline_rows, r.candidate_rows, r.row_delta
+        ),
+    ));
+    body.push_str(&kpi(
+        "Schema Changes",
+        &format!(
+            "+{} / -{} / ~{}",
+            r.added_columns.len(),
+            r.removed_columns.len(),
+            r.type_changes.len()
+        ),
+    ));
+    body.push_str(&kpi("Missing Δ", &format!("{:+.2}%", r.missing_pct_delta)));
+    body.push_str(&kpi("Max Numeric KS", &format!("{:.3}", r.max_ks)));
+    body.push_str(&kpi("Max Cat TVD", &format!("{:.3}", r.max_tvd)));
+    body.push_str("</div>");
+
+    // Alerts & threshold failures
+    body.push_str("<h2>Drift Alerts &amp; Threshold Checks</h2><div class=\"card\">");
+    if r.failures.is_empty() && r.alerts.is_empty() {
+        body.push_str(
+            "<span class=\"badge b-pass\">IDENTICAL / CLEAN</span> No significant drift detected.",
+        );
+    } else {
+        for f in &r.failures {
+            body.push_str(&format!(
+                "<div class=\"alert-row\"><span class=\"badge b-fail\">FAIL</span><div><strong>{}</strong></div></div>",
+                esc(f)
+            ));
+        }
+        for a in &r.alerts {
+            let cls = match a.severity.as_str() {
+                "high" => "b-high",
+                "medium" => "b-med",
+                _ => "b-info",
+            };
+            body.push_str(&format!(
+                "<div class=\"alert-row\"><span class=\"badge {cls}\">{}</span><div><strong>{}</strong><div class=\"hint\">Fix: {}</div></div></div>",
+                esc(&a.code),
+                esc(&a.message),
+                esc(&a.fix_hint)
+            ));
+        }
+    }
+    body.push_str("</div>");
+
+    // Optional key-level row diff
+    if let Some(kd) = &r.key_diff {
+        body.push_str(&format!(
+            "<h2>Key-Level Row Diff (<code>{}</code>)</h2><div class=\"card\">",
+            esc(&kd.keys.join(", "))
+        ));
+        body.push_str(&format!(
+            "<div class=\"meta\" style=\"margin-bottom:10px\">Added: <strong>{}</strong> · Removed: <strong>{}</strong> · Changed: <strong>{}</strong> · Unchanged: <strong>{}</strong></div>",
+            kd.added_keys_count, kd.removed_keys_count, kd.changed_rows, kd.unchanged_rows
+        ));
+        if !kd.added_key_samples.is_empty() {
+            body.push_str(&format!(
+                "<div class=\"hint\">Added sample keys: <code>{}</code></div>",
+                esc(&kd.added_key_samples.join(", "))
+            ));
+        }
+        if !kd.removed_key_samples.is_empty() {
+            body.push_str(&format!(
+                "<div class=\"hint\">Removed sample keys: <code>{}</code></div>",
+                esc(&kd.removed_key_samples.join(", "))
+            ));
+        }
+        if !kd.cell_diff_samples.is_empty() {
+            body.push_str("<table style=\"margin-top:10px\"><thead><tr><th>Key</th><th>Column</th><th>Baseline</th><th>Candidate</th></tr></thead><tbody>");
+            for s in &kd.cell_diff_samples {
+                body.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td></tr>",
+                    esc(&s.key),
+                    esc(&s.column),
+                    esc(&s.baseline),
+                    esc(&s.candidate)
+                ));
+            }
+            body.push_str("</tbody></table>");
+        }
+        body.push_str("</div>");
+    }
+
+    // Per-column drift cards
+    body.push_str("<h2>Column-by-Column Drift</h2>");
+    body.push_str("<input class=\"search\" type=\"search\" placeholder=\"Filter columns...\" oninput=\"filterCols(this.value)\" />");
+    for col in &r.columns {
+        body.push_str(&render_compare_col_card(col));
+    }
+
+    wrap_html(
+        &format!(
+            "statkeel Compare — {} vs {}",
+            r.baseline_name, r.candidate_name
+        ),
+        &body,
+    )
+}
+
+fn render_compare_col_card(c: &ColumnComparison) -> String {
+    let d_cls = match c.drift_level.as_str() {
+        "high" => "b-high",
+        "medium" => "b-med",
+        _ => "b-pass",
+    };
+    let mut left_tbl = String::from("<table><tbody>");
+    left_tbl.push_str(&kv_row(
+        "Type (Base → Cand)",
+        &format!("{} → {}", c.baseline_type, c.candidate_type),
+    ));
+    left_tbl.push_str(&kv_row(
+        "Null % (Δ)",
+        &format!(
+            "{:.1}% → {:.1}% ({:+.1}%)",
+            c.baseline_null_pct, c.candidate_null_pct, c.null_pct_delta
+        ),
+    ));
+    left_tbl.push_str(&kv_row(
+        "Distinct",
+        &format!("{} → {}", c.baseline_distinct, c.candidate_distinct),
+    ));
+    if let Some(n) = &c.numeric {
+        left_tbl.push_str(&kv_row(
+            "Mean (Δ)",
+            &format!(
+                "{} → {} ({:+})",
+                n.baseline_mean, n.candidate_mean, n.mean_delta
+            ),
+        ));
+        left_tbl.push_str(&kv_row(
+            "Median (Δ)",
+            &format!(
+                "{} → {} ({:+})",
+                n.baseline_median, n.candidate_median, n.median_delta
+            ),
+        ));
+        left_tbl.push_str(&kv_row("KS Statistic", &format!("{:.4}", n.ks_stat)));
+    } else if let Some(cat) = &c.categorical {
+        left_tbl.push_str(&kv_row("Categorical TVD", &format!("{:.4}", cat.tvd)));
+    }
+    left_tbl.push_str("</tbody></table>");
+
+    let right_viz = if let Some(n) = &c.numeric {
+        render_dual_histogram_svg(&n.dual_histogram)
+    } else if let Some(cat) = &c.categorical {
+        let mut t = String::from(
+            "<table><thead><tr><th>Category</th><th class=\"num\">Base %</th><th class=\"num\">Cand %</th><th class=\"num\">Δ</th></tr></thead><tbody>",
+        );
+        for s in cat.top_shifts.iter().take(6) {
+            t.push_str(&format!(
+                "<tr><td><code>{}</code></td><td class=\"num\">{:.1}%</td><td class=\"num\">{:.1}%</td><td class=\"num\">{:+.1}%</td></tr>",
+                esc(&s.value),
+                s.baseline_pct,
+                s.candidate_pct,
+                s.delta_pct
+            ));
+        }
+        t.push_str("</tbody></table>");
+        t
+    } else {
+        "<div class=\"hint\">High-cardinality text column</div>".to_string()
+    };
+
+    format!(
+        "<div class=\"card col-card\" data-col=\"{}\"><div class=\"col-head\"><span class=\"col-name\">{}</span><span class=\"badge {d_cls}\">DRIFT: {}</span></div><div class=\"col-grid\"><div>{left_tbl}</div><div>{right_viz}</div></div></div>",
+        esc(&c.name.to_ascii_lowercase()),
+        esc(&c.name),
+        esc(&c.drift_level.to_uppercase())
+    )
+}
+
+fn render_dual_histogram_svg(bins: &[DualHistBin]) -> String {
+    if bins.is_empty() {
+        return String::new();
+    }
+    let max_p = bins
+        .iter()
+        .map(|b| b.baseline_pct.max(b.candidate_pct))
+        .fold(1.0_f64, f64::max);
+    let w = 440.0;
+    let h = 148.0;
+    let pad_b = 26.0;
+    let chart_h = h - pad_b - 18.0;
+    let group_w = (w - 16.0) / bins.len() as f64;
+    let bar_w = ((group_w - 4.0) / 2.0).max(2.0);
+
+    let mut rects = String::new();
+    for (i, b) in bins.iter().enumerate() {
+        let x0 = 8.0 + i as f64 * group_w;
+        let bh_a = (b.baseline_pct / max_p) * chart_h;
+        let bh_b = (b.candidate_pct / max_p) * chart_h;
+        let ya = 18.0 + (chart_h - bh_a);
+        let yb = 18.0 + (chart_h - bh_b);
+        rects.push_str(&format!(
+            "<rect x=\"{x0:.1}\" y=\"{ya:.1}\" width=\"{bar_w:.1}\" height=\"{bh_a:.1}\" rx=\"2\" fill=\"var(--accent)\" opacity=\"0.85\"><title>Baseline [{}, {}]: {:.1}%</title></rect>",
+            b.start, b.end, b.baseline_pct
+        ));
+        rects.push_str(&format!(
+            "<rect x=\"{:.1}\" y=\"{yb:.1}\" width=\"{bar_w:.1}\" height=\"{bh_b:.1}\" rx=\"2\" fill=\"var(--amber)\" opacity=\"0.9\"><title>Candidate [{}, {}]: {:.1}%</title></rect>",
+            x0 + bar_w + 1.0,
+            b.start,
+            b.end,
+            b.candidate_pct
+        ));
+    }
+    let lo = bins.first().map(|b| b.start).unwrap_or(0.0);
+    let hi = bins.last().map(|b| b.end).unwrap_or(0.0);
+    format!(
+        "<svg viewBox=\"0 0 {w} {h}\" width=\"100%\" height=\"{h}\" role=\"img\" aria-label=\"Baseline vs Candidate Histogram\"><text x=\"8\" y=\"12\" fill=\"var(--accent)\" font-size=\"10\" font-family=\"monospace\">■ Baseline</text><text x=\"86\" y=\"12\" fill=\"var(--amber)\" font-size=\"10\" font-family=\"monospace\">■ Candidate</text>{rects}<text x=\"8\" y=\"{}\" fill=\"var(--muted)\" font-size=\"10\" font-family=\"monospace\">{lo}</text><text x=\"{}\" y=\"{}\" text-anchor=\"end\" fill=\"var(--muted)\" font-size=\"10\" font-family=\"monospace\">{hi}</text></svg>",
+        h - 6.0,
+        w - 8.0,
+        h - 6.0
+    )
 }
 
 fn wrap_html(title: &str, body: &str) -> String {

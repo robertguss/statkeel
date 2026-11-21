@@ -15,6 +15,7 @@ Part of the **Keel Data Stack** (`datakeel` · `sqlkeel` · `loadkeel` · `fetch
 1. **Instant `ydata-profiling` (`pandas-profiling`) replacement (`statkeel profile`):** Profile CSV, TSV, JSON/JSONL, Parquet, SQLite, or PostgreSQL tables in milliseconds — zero Python/Pandas/matplotlib dependency tree. Emits a **zero-dependency self-contained interactive HTML report** (inline SVG histograms, categorical charts, correlation table, dark/light toggle) **and** a compact `--format agent` statistical brief.
 2. **Cross-Source Join Health & Auto-Diagnosis (`statkeel join`):** Before joining two systems (e.g., Populi SIS ↔ Canvas LMS), empirically measure cardinality (`1:1`, `1:N`, `N:1`, `M:N`), exact fan-out multipliers, orphan coverage, and sample unmatched keys — plus automatic normalization probing (*"stripping leading zeros lifts match rate +84.2%"*).
 3. **Proof-Carrying AI SQL Queries (`statkeel audit`):** Stop guessing whether an AI-written analytical query silently multiplied rows or dropped 25% of your cohort. `statkeel audit` runs **static semantic traps** + **configurable domain guardrails** + a **live read-only CTE/JOIN row-count waterfall** + **3-row spot-check receipts** so both you and your AI agent get verifiable proof before trusting any number.
+4. **Snapshot Drift & SQL Refactor Regression Diff (`statkeel compare`):** Compare two datasets (e.g., Fall 2025 vs. Fall 2026) or two SQL queries against the same database (`--baseline-query` vs. `--candidate-query`) to detect schema drift, Kolmogorov–Smirnov (KS) numeric distribution shifts, Total Variation Distance (TVD) categorical shifts, lost key uniqueness, and exact key-level cell diffs — with overlaid dual-series SVG histograms in `--html`.
 
 ---
 
@@ -74,7 +75,20 @@ Findings:
   [HIGH:L001_LIVE_JOIN_FANOUT]  `LEFT JOIN canvas.pseudonyms` multiplied rows 1240 -> 1289 ...
 ```
 
-### 4. Install the bundled Agent Skill
+### 4. Compare two snapshots or verify a SQL query refactor
+```bash
+# Compare two dataset snapshots with overlaid dual-series HTML histograms
+statkeel compare fall_2025.parquet fall_2026.parquet --key student_id --html drift.html
+
+# Prove a refactored SQL query produces identical rows (exit 1 on any diff)
+statkeel compare --db "$DATABASE_URL" \
+  --baseline-query old_engagement.sql \
+  --candidate-query new_engagement.sql \
+  --key person_id \
+  --fail-on-row-diff
+```
+
+### 5. Install the bundled Agent Skill
 ```bash
 statkeel skill --install .agents/skills
 ```

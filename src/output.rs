@@ -1,4 +1,5 @@
 use crate::audit::{AuditReport, FindingSeverity};
+use crate::compare::CompareReport;
 use crate::error::StatkeelError;
 use crate::join::JoinReport;
 use crate::profile::{AlertSeverity, DatasetProfile};
@@ -451,6 +452,157 @@ pub fn print_audit(r: &AuditReport, fmt: ResolvedFormat) {
                         })
                         .collect();
                     println!("  {}", vals.join(" | "));
+                }
+            }
+        }
+    }
+}
+
+pub fn print_compare(r: &CompareReport, fmt: ResolvedFormat) {
+    match fmt {
+        ResolvedFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(r).unwrap_or_else(|_| "{}".to_string())
+            );
+        }
+        ResolvedFormat::Agent => {
+            let pct_s = r
+                .row_delta_pct
+                .map(|p| format!(" ({p:+.2}%)"))
+                .unwrap_or_default();
+            println!(
+                "verdict: {} | ok: {} | baseline: {} ({} rows) | candidate: {} ({} rows) | row_delta: {:+}{pct_s}",
+                r.verdict,
+                r.ok,
+                r.baseline_name,
+                r.baseline_rows,
+                r.candidate_name,
+                r.candidate_rows,
+                r.row_delta
+            );
+            println!(
+                "schema: +{} added -{} removed ~{} type_changes | missing_delta: {:+.2}% | max_ks: {:.4} | max_tvd: {:.4}",
+                r.added_columns.len(),
+                r.removed_columns.len(),
+                r.type_changes.len(),
+                r.missing_pct_delta,
+                r.max_ks,
+                r.max_tvd
+            );
+            if !r.added_columns.is_empty() {
+                println!("added_columns: [{}]", r.added_columns.join(", "));
+            }
+            if !r.removed_columns.is_empty() {
+                println!("removed_columns: [{}]", r.removed_columns.join(", "));
+            }
+            if let Some(kd) = &r.key_diff {
+                println!(
+                    "key_diff ({}): +{} added | -{} removed | ~{} changed | {} unchanged",
+                    kd.keys.join(","),
+                    kd.added_keys_count,
+                    kd.removed_keys_count,
+                    kd.changed_rows,
+                    kd.unchanged_rows
+                );
+                if !kd.added_key_samples.is_empty() {
+                    println!("  added_keys: [{}]", kd.added_key_samples.join(", "));
+                }
+                if !kd.removed_key_samples.is_empty() {
+                    println!("  removed_keys: [{}]", kd.removed_key_samples.join(", "));
+                }
+                for s in &kd.cell_diff_samples {
+                    println!(
+                        "  diff [key={} col={}]: {} -> {}",
+                        s.key, s.column, s.baseline, s.candidate
+                    );
+                }
+            }
+            if !r.alerts.is_empty() {
+                println!("alerts ({}):", r.alerts.len());
+                for a in r.alerts.iter().take(12) {
+                    println!(
+                        "  - [{}:{}] {} | fix: {}",
+                        a.severity.to_uppercase(),
+                        a.code,
+                        a.message,
+                        a.fix_hint
+                    );
+                }
+            }
+            for f in &r.failures {
+                println!("failure: {f}");
+            }
+        }
+        ResolvedFormat::Human => {
+            let badge = match r.verdict.as_str() {
+                "FAIL" => "FAIL".red().bold().to_string(),
+                "DRIFT_DETECTED" => "DRIFT_DETECTED".red().bold().to_string(),
+                "LOW_DRIFT" => "LOW_DRIFT".yellow().bold().to_string(),
+                _ => "IDENTICAL".green().bold().to_string(),
+            };
+            println!(
+                "{} {} vs {}  [{}]",
+                "⚓ statkeel compare".cyan().bold(),
+                r.baseline_name.bold(),
+                r.candidate_name.bold(),
+                badge
+            );
+            let pct_s = r
+                .row_delta_pct
+                .map(|p| format!(" ({p:+.2}%)"))
+                .unwrap_or_default();
+            println!(
+                "   Rows: {} -> {} ({:+}{pct_s})  |  Missing Δ: {:+.2}%  |  Max KS: {:.3}  |  Max TVD: {:.3}",
+                r.baseline_rows,
+                r.candidate_rows,
+                r.row_delta,
+                r.missing_pct_delta,
+                r.max_ks,
+                r.max_tvd
+            );
+            if !r.added_columns.is_empty() || !r.removed_columns.is_empty() {
+                println!(
+                    "   Schema: +[{}]  -[{}]",
+                    r.added_columns.join(", "),
+                    r.removed_columns.join(", ")
+                );
+            }
+            if let Some(kd) = &r.key_diff {
+                println!(
+                    "\n{} ({}): +{} added | -{} removed | ~{} changed | {} unchanged",
+                    "Key Diff".bold(),
+                    kd.keys.join(", "),
+                    kd.added_keys_count,
+                    kd.removed_keys_count,
+                    kd.changed_rows,
+                    kd.unchanged_rows
+                );
+                for s in &kd.cell_diff_samples {
+                    println!(
+                        "  key={}  {} : {} -> {}",
+                        s.key.cyan(),
+                        s.column.bold(),
+                        s.baseline.dimmed(),
+                        s.candidate
+                    );
+                }
+            }
+            if !r.alerts.is_empty() {
+                println!("\n{}", "Drift Alerts:".bold());
+                for a in &r.alerts {
+                    let tag = match a.severity.as_str() {
+                        "high" => format!("[HIGH:{}]", a.code).red().bold().to_string(),
+                        "medium" => format!("[WARN:{}]", a.code).yellow().bold().to_string(),
+                        _ => format!("[INFO:{}]", a.code).cyan().to_string(),
+                    };
+                    println!("  {tag} {}", a.message);
+                }
+            }
+            if !r.failures.is_empty() {
+                println!("\n{}", "Threshold Failures:".red().bold());
+                for f in &r.failures {
+                    println!("  ✖ {f}");
                 }
             }
         }

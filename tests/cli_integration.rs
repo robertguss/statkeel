@@ -342,6 +342,134 @@ fn audit_rejects_non_select_statements() {
 }
 
 #[test]
+fn compare_detects_schema_ks_tvd_and_key_row_diff_and_renders_html() {
+    let dir = TempDir::new().unwrap();
+    let base_csv = dir.path().join("fall25.csv");
+    let cand_csv = dir.path().join("fall26.csv");
+    let html_path = dir.path().join("compare.html");
+
+    std::fs::write(
+        &base_csv,
+        "student_id,gpa,program,legacy_col\n\
+         1001,3.90,MDiv,x\n\
+         1002,3.80,MDiv,x\n\
+         1003,3.70,MDiv,x\n\
+         1004,3.85,MAR,x\n\
+         1005,3.75,MDiv,x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &cand_csv,
+        "student_id,gpa,program,new_col\n\
+         1001,2.10,ThM,y\n\
+         1002,2.20,ThM,y\n\
+         1003,2.30,MAR,y\n\
+         1004,2.40,MAR,y\n\
+         1006,2.05,ThM,y\n",
+    )
+    .unwrap();
+
+    let out = statkeel()
+        .args([
+            "compare",
+            base_csv.to_str().unwrap(),
+            cand_csv.to_str().unwrap(),
+            "--key",
+            "student_id",
+            "--format",
+            "json",
+            "--html",
+            html_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["verdict"], "DRIFT_DETECTED");
+    assert_eq!(v["added_columns"][0], "new_col");
+    assert_eq!(v["removed_columns"][0], "legacy_col");
+    assert!(
+        v["max_ks"].as_f64().unwrap() >= 0.99,
+        "expected KS ~ 1.0, got {}",
+        v["max_ks"]
+    );
+    assert!(
+        v["max_tvd"].as_f64().unwrap() >= 0.5,
+        "expected TVD >= 0.5, got {}",
+        v["max_tvd"]
+    );
+    assert_eq!(v["key_diff"]["added_keys_count"], 1);
+    assert_eq!(v["key_diff"]["removed_keys_count"], 1);
+    assert_eq!(v["key_diff"]["changed_rows"], 4);
+
+    let html = std::fs::read_to_string(&html_path).unwrap();
+    assert!(html.contains("statkeel Compare"));
+    assert!(html.contains("<svg"));
+    assert!(html.contains("Baseline"));
+
+    // Threshold enforcement: --fail-on-row-diff exits 1
+    statkeel()
+        .args([
+            "compare",
+            base_csv.to_str().unwrap(),
+            cand_csv.to_str().unwrap(),
+            "--key",
+            "student_id",
+            "--fail-on-row-diff",
+            "--format",
+            "agent",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("verdict: FAIL"));
+}
+
+#[test]
+fn compare_queries_against_sqlite_proves_identical_refactor() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("refactor.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE students (id INT PRIMARY KEY, name TEXT, gpa REAL);
+        INSERT INTO students VALUES (1, 'Alice', 3.9), (2, 'Bob', 3.5), (3, 'Carol', 3.8);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    // Identical refactored query passes --fail-on-row-diff with verdict IDENTICAL!
+    let out = statkeel()
+        .args([
+            "compare",
+            "--db",
+            &format!("sqlite://{}", db_path.display()),
+            "--baseline-query",
+            "SELECT id, name, gpa FROM students ORDER BY id",
+            "--candidate-query",
+            "WITH s AS (SELECT * FROM students) SELECT id, name, gpa FROM s ORDER BY id DESC",
+            "--key",
+            "id",
+            "--fail-on-row-diff",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["verdict"], "IDENTICAL");
+    assert_eq!(v["key_diff"]["unchanged_rows"], 3);
+    assert_eq!(v["key_diff"]["changed_rows"], 0);
+}
+
+#[test]
 fn skill_prints_and_installs() {
     let dir = TempDir::new().unwrap();
     statkeel()

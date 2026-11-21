@@ -1,4 +1,5 @@
 mod audit;
+mod compare;
 mod error;
 mod html;
 mod join;
@@ -8,10 +9,12 @@ mod skill;
 mod source;
 
 use crate::audit::{AuditOptions, audit_query};
+use crate::compare::{CompareOptions, compare_tables};
 use crate::error::{Result, StatkeelError};
 use crate::join::{JoinThresholds, analyze_join};
 use crate::output::{
-    OutputFormat, ResolvedFormat, print_audit, print_error, print_join, print_profile,
+    OutputFormat, ResolvedFormat, print_audit, print_compare, print_error, print_join,
+    print_profile,
 };
 use crate::profile::{AlertSeverity, export_contract, profile_table};
 use crate::source::{LoadOptions, load_source};
@@ -131,6 +134,56 @@ enum Commands {
         #[arg(long)]
         strict: bool,
         /// Write a self-contained HTML Query Trust Receipt.
+        #[arg(long)]
+        html: Option<PathBuf>,
+    },
+
+    /// Compare two datasets or two SQL queries for schema, distribution (KS/TVD), and key-level row drift.
+    Compare {
+        /// Baseline source (file, sqlite:///db#table, or postgres://...#schema.table). Omit when using --db + --baseline-query.
+        baseline: Option<String>,
+        /// Candidate source (file, sqlite:///db#table, or postgres://...#schema.table). Omit when using --db + --candidate-query.
+        candidate: Option<String>,
+        /// Shared read-only DB URL (postgres://... or sqlite:///path.db) for comparing --baseline-query vs --candidate-query.
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
+        /// Baseline SQL query (inline SELECT/WITH or path to a .sql file) run against --db.
+        #[arg(long)]
+        baseline_query: Option<String>,
+        /// Candidate SQL query (inline SELECT/WITH or path to a .sql file) run against --db.
+        #[arg(long)]
+        candidate_query: Option<String>,
+        /// Optional table name for baseline DB source.
+        #[arg(long)]
+        baseline_table: Option<String>,
+        /// Optional table name for candidate DB source.
+        #[arg(long)]
+        candidate_table: Option<String>,
+        /// Comma-separated primary key column(s) for exact row-level & cell-level diffing.
+        #[arg(long)]
+        key: Option<String>,
+        /// Cap maximum rows read per side.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Statement timeout in seconds for PostgreSQL queries (default 30).
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+        /// Fail (exit 1) if any column was added, removed, or changed type.
+        #[arg(long)]
+        fail_on_schema_change: bool,
+        /// Fail (exit 1) if absolute row-count change % exceeds this limit.
+        #[arg(long)]
+        max_row_delta_pct: Option<f64>,
+        /// Fail (exit 1) if max numeric Kolmogorov-Smirnov statistic exceeds this limit (0.0..1.0).
+        #[arg(long)]
+        max_ks: Option<f64>,
+        /// Fail (exit 1) if max categorical Total Variation Distance exceeds this limit (0.0..1.0).
+        #[arg(long)]
+        max_tvd: Option<f64>,
+        /// Fail (exit 1) if any row was added, removed, or changed under --key (ideal for SQL refactor tests).
+        #[arg(long)]
+        fail_on_row_diff: bool,
+        /// Write a self-contained offline HTML comparison dashboard.
         #[arg(long)]
         html: Option<PathBuf>,
     },
@@ -313,6 +366,90 @@ fn run(cmd: Commands, fmt: ResolvedFormat) -> Result<ExitCode> {
             })
         }
 
+        Commands::Compare {
+            baseline,
+            candidate,
+            db,
+            baseline_query,
+            candidate_query,
+            baseline_table,
+            candidate_table,
+            key,
+            limit,
+            timeout_secs,
+            fail_on_schema_change,
+            max_row_delta_pct,
+            max_ks,
+            max_tvd,
+            fail_on_row_diff,
+            html: html_out,
+        } => {
+            let (mut base_data, mut cand_data) = if let (Some(bq_spec), Some(cq_spec)) =
+                (baseline_query, candidate_query)
+            {
+                let db_url = db.ok_or_else(|| {
+                        StatkeelError::config(
+                            "`--baseline-query` and `--candidate-query` require `--db` (or `DATABASE_URL`)",
+                            "Pass `--db postgres://...` or `--db sqlite:///path.db`.",
+                        )
+                    })?;
+                let bq = load_sql_or_inline(&bq_spec)?;
+                let cq = load_sql_or_inline(&cq_spec)?;
+                let b_opts = LoadOptions::with_defaults(None, Some(bq), limit, timeout_secs);
+                let c_opts = LoadOptions::with_defaults(None, Some(cq), limit, timeout_secs);
+                let mut bd = load_source(&db_url, &b_opts)?;
+                let mut cd = load_source(&db_url, &c_opts)?;
+                bd.name = short_query_label(&bq_spec, "baseline_query");
+                cd.name = short_query_label(&cq_spec, "candidate_query");
+                (bd, cd)
+            } else if let (Some(b_src), Some(c_src)) = (baseline, candidate) {
+                let b_opts = LoadOptions::with_defaults(baseline_table, None, limit, timeout_secs);
+                let c_opts = LoadOptions::with_defaults(candidate_table, None, limit, timeout_secs);
+                (load_source(&b_src, &b_opts)?, load_source(&c_src, &c_opts)?)
+            } else {
+                return Err(StatkeelError::config(
+                    "Provide either `<baseline> <candidate>` sources OR `--db` with `--baseline-query` and `--candidate-query`",
+                    "Example: `statkeel compare fall25.csv fall26.csv --key student_id`",
+                ));
+            };
+
+            if base_data.name == cand_data.name {
+                base_data.name = format!("{} (baseline)", base_data.name);
+                cand_data.name = format!("{} (candidate)", cand_data.name);
+            }
+
+            let keys: Vec<String> = key
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let opts = CompareOptions {
+                keys,
+                fail_on_schema_change,
+                max_row_delta_pct,
+                max_ks,
+                max_tvd,
+                fail_on_row_diff,
+            };
+            let report = compare_tables(&base_data, &cand_data, &opts)?;
+
+            if let Some(html_path) = html_out {
+                let rendered = html::render_compare_html(&report);
+                std::fs::write(&html_path, rendered)
+                    .map_err(|e| StatkeelError::io(e, &html_path.display().to_string()))?;
+                eprintln!("Wrote HTML comparison report to {}", html_path.display());
+            }
+
+            print_compare(&report, fmt);
+            Ok(if report.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+
         Commands::Skill { install } => {
             if let Some(dir) = install {
                 let path = skill::install_skill(&dir)?;
@@ -328,4 +465,23 @@ fn run(cmd: Commands, fmt: ResolvedFormat) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn load_sql_or_inline(spec: &str) -> Result<String> {
+    let p = std::path::Path::new(spec);
+    if p.exists() && p.is_file() {
+        std::fs::read_to_string(p).map_err(|e| StatkeelError::io(e, spec))
+    } else {
+        Ok(spec.to_string())
+    }
+}
+
+fn short_query_label(spec: &str, fallback: &str) -> String {
+    let p = std::path::Path::new(spec);
+    if p.exists()
+        && let Some(name) = p.file_name().and_then(|s| s.to_str())
+    {
+        return name.to_string();
+    }
+    fallback.to_string()
 }
