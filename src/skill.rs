@@ -45,7 +45,7 @@ Whenever asked to analyze data or join multiple sources (e.g., Populi SIS + Canv
 |---|---|---|
 | `statkeel profile <source>` | Instant EDA stats, alerts, correlations, HTML report, contract export | `--table`, `--query`, `--limit`, `--html <out.html>`, `--to-contract toml\|odcs`, `--fail-on-high` |
 | `statkeel join <left> <right>` | Empirical cardinality, fan-out, orphan coverage, auto-fix key hints | `--left-key`, `--right-key`, `--expect-cardinality`, `--max-fanout`, `--min-left-coverage`, `--html` |
-| `statkeel audit [query.sql]` | Static semantic checks + domain rules + live read-only CTE/JOIN waterfall + 3-row spot check | `--query`, `--db`, `--rules <rules.toml>`, `--max-fanout`, `--max-drop-pct`, `--samples`, `--strict`, `--html` |
+| `statkeel audit [query.sql]` | Static semantic checks + domain rules + live read-only CTE/JOIN waterfall + `--assert` accounting invariants + `--trace-key` entity lineage + 3-row spot check | `--query`, `--db`, `--rules <rules.toml>`, `--assert`, `--trace-key`, `--max-fanout`, `--max-drop-pct`, `--samples`, `--strict`, `--html` |
 | `statkeel compare [base] [cand]` | Snapshot drift (schema, KS numeric shift, TVD categorical shift) OR SQL query-vs-query refactor regression diff | `--db`, `--baseline-query`, `--candidate-query`, `--key`, `--fail-on-row-diff`, `--fail-on-schema-change`, `--max-ks`, `--max-tvd`, `--html` |
 | `statkeel skill` | Print or install this `SKILL.md` | `--install <dir>` |
 

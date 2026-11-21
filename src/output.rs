@@ -377,6 +377,42 @@ pub fn print_audit(r: &AuditReport, fmt: ResolvedFormat) {
                     );
                 }
             }
+            if !r.assertions.is_empty() {
+                println!("assertions ({}):", r.assertions.len());
+                for a in &r.assertions {
+                    println!(
+                        "  - [{}] `{}` (observed={}, expected={})",
+                        if a.passed { "PASS" } else { "FAIL" },
+                        a.expr,
+                        a.observed,
+                        a.expected
+                    );
+                }
+            }
+            if !r.entity_traces.is_empty() {
+                println!("entity_traces ({}):", r.entity_traces.len());
+                for tr in &r.entity_traces {
+                    let base_s = tr
+                        .base_row
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".to_string());
+                    let final_s = if tr.final_rows.is_empty() {
+                        "DROPPED (0 rows)".to_string()
+                    } else {
+                        serde_json::to_string(&tr.final_rows).unwrap_or_default()
+                    };
+                    println!(
+                        "  - {}={} [{}] | base: {} | final({}x): {}",
+                        tr.key_column,
+                        tr.key_value,
+                        tr.role,
+                        base_s,
+                        tr.final_rows.len(),
+                        final_s
+                    );
+                }
+            }
             if let Some(sc) = &r.spot_check
                 && !sc.rows.is_empty()
             {
@@ -435,6 +471,48 @@ pub fn print_audit(r: &AuditReport, fmt: ResolvedFormat) {
                     };
                     println!("  {tag} {}", f.message);
                     println!("         {} {}", "fix:".dimmed(), f.fix_hint.dimmed());
+                }
+            }
+            if !r.assertions.is_empty() {
+                println!("\n{}", "Accounting Invariants:".bold());
+                for a in &r.assertions {
+                    let tag = if a.passed {
+                        "[PASS]".green().bold().to_string()
+                    } else {
+                        "[FAIL]".red().bold().to_string()
+                    };
+                    println!(
+                        "  {tag} {}  (observed: {}, expected: {})",
+                        a.expr.bold(),
+                        a.observed,
+                        a.expected
+                    );
+                }
+            }
+            if !r.entity_traces.is_empty() {
+                println!("\n{}", "End-to-End Entity Lineage Traces:".bold());
+                for tr in &r.entity_traces {
+                    let role_styled = if tr.role.starts_with("fanout") || tr.role == "dropped" {
+                        tr.role.red().bold().to_string()
+                    } else {
+                        tr.role.green().bold().to_string()
+                    };
+                    println!(
+                        "  • {} = {}  [{}]",
+                        tr.key_column,
+                        tr.key_value.cyan().bold(),
+                        role_styled
+                    );
+                    if let Some(b) = &tr.base_row {
+                        println!("      base  : {}", b);
+                    }
+                    if tr.final_rows.is_empty() {
+                        println!("      final : {}", "DROPPED (0 rows in output)".red());
+                    } else {
+                        for (i, fr) in tr.final_rows.iter().enumerate() {
+                            println!("      final{}: {}", i + 1, fr);
+                        }
+                    }
                 }
             }
             if let Some(sc) = &r.spot_check

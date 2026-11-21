@@ -487,6 +487,54 @@ pub fn render_audit_html(r: &AuditReport) -> String {
     }
     body.push_str("</div>");
 
+    if !r.assertions.is_empty() {
+        body.push_str("<h2>Accounting Invariants (--assert)</h2><div class=\"card\"><table><thead><tr><th>Status</th><th>Invariant</th><th>Observed</th><th>Expected</th></tr></thead><tbody>");
+        for a in &r.assertions {
+            let cls = if a.passed { "b-pass" } else { "b-fail" };
+            let lbl = if a.passed { "PASS" } else { "FAIL" };
+            body.push_str(&format!(
+                "<tr><td><span class=\"badge {cls}\">{lbl}</span></td><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td></tr>",
+                esc(&a.expr),
+                esc(&a.observed),
+                esc(&a.expected)
+            ));
+        }
+        body.push_str("</tbody></table></div>");
+    }
+
+    if !r.entity_traces.is_empty() {
+        body.push_str("<h2>End-to-End Entity Lineage Traces</h2>");
+        for tr in &r.entity_traces {
+            let r_cls = if tr.role.starts_with("fanout") || tr.role == "dropped" {
+                "b-high"
+            } else {
+                "b-pass"
+            };
+            body.push_str(&format!(
+                "<div class=\"card\"><div class=\"col-head\"><span class=\"col-name\">{} = {}</span><span class=\"badge {r_cls}\">{}</span></div>",
+                esc(&tr.key_column),
+                esc(&tr.key_value),
+                esc(&tr.role.to_uppercase())
+            ));
+            if let Some(b) = &tr.base_row {
+                body.push_str(&format!(
+                    "<div class=\"hint\">Base row:</div><pre>{}</pre>",
+                    esc(&serde_json::to_string_pretty(b).unwrap_or_default())
+                ));
+            }
+            if tr.final_rows.is_empty() {
+                body.push_str("<div class=\"hint\"><span class=\"badge b-high\">DROPPED</span> 0 rows in final query output.</div>");
+            } else {
+                body.push_str(&format!(
+                    "<div class=\"hint\">Final output ({} row(s)):</div><pre>{}</pre>",
+                    tr.final_rows.len(),
+                    esc(&serde_json::to_string_pretty(&tr.final_rows).unwrap_or_default())
+                ));
+            }
+            body.push_str("</div>");
+        }
+    }
+
     if let Some(sc) = &r.spot_check
         && !sc.rows.is_empty()
     {

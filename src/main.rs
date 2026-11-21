@@ -7,6 +7,7 @@ mod output;
 mod profile;
 mod skill;
 mod source;
+mod trust;
 
 use crate::audit::{AuditOptions, audit_query};
 use crate::compare::{CompareOptions, compare_tables};
@@ -133,6 +134,12 @@ enum Commands {
         /// Treat WARN findings as exit code 1 as well.
         #[arg(long)]
         strict: bool,
+        /// Repeatable accounting invariant assertion (e.g. `unique(person_id)`, `final_rows == base_rows`, `sum(credits) <= 50000`).
+        #[arg(long = "assert")]
+        assertions: Vec<String>,
+        /// Entity key column to trace end-to-end from base table to final output (typical, fan-out, and dropped rows).
+        #[arg(long)]
+        trace_key: Option<String>,
         /// Write a self-contained HTML Query Trust Receipt.
         #[arg(long)]
         html: Option<PathBuf>,
@@ -319,6 +326,8 @@ fn run(cmd: Commands, fmt: ResolvedFormat) -> Result<ExitCode> {
             samples,
             timeout_secs,
             strict,
+            assertions,
+            trace_key,
             html: html_out,
         } => {
             let sql_raw = if let Some(q) = query {
@@ -348,6 +357,8 @@ fn run(cmd: Commands, fmt: ResolvedFormat) -> Result<ExitCode> {
                 samples,
                 timeout_secs,
                 strict,
+                assertions,
+                trace_key,
             };
             let report = audit_query(&sql_raw, &opts)?;
 

@@ -1,5 +1,9 @@
 use crate::error::{Result, StatkeelError};
 use crate::source::{CellValue, connect_postgres, split_sqlite_spec};
+use crate::trust::{
+    AssertionResult, EntityTrace, run_assertions_postgres, run_assertions_sqlite,
+    trace_entities_postgres, trace_entities_sqlite,
+};
 use indexmap::IndexMap;
 use postgres::Client as PgClient;
 use rusqlite::{Connection as SqliteConn, OpenFlags, types::ValueRef};
@@ -16,6 +20,8 @@ use std::collections::HashSet;
 pub struct AuditRulesFile {
     #[serde(default)]
     pub table_rules: Vec<TableRule>,
+    #[serde(default)]
+    pub assertions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +102,8 @@ pub struct AuditReport {
     pub findings: Vec<AuditFinding>,
     pub waterfall: Vec<WaterfallStep>,
     pub join_diagnostics: Vec<LiveJoinDiag>,
+    pub assertions: Vec<AssertionResult>,
+    pub entity_traces: Vec<EntityTrace>,
     pub spot_check: Option<SpotCheckSample>,
 }
 
@@ -108,6 +116,8 @@ pub struct AuditOptions {
     pub samples: usize,
     pub timeout_secs: u64,
     pub strict: bool,
+    pub assertions: Vec<String>,
+    pub trace_key: Option<String>,
 }
 
 impl Default for AuditOptions {
@@ -120,6 +130,8 @@ impl Default for AuditOptions {
             samples: 3,
             timeout_secs: 15,
             strict: false,
+            assertions: Vec::new(),
+            trace_key: None,
         }
     }
 }
@@ -195,9 +207,14 @@ pub fn audit_query(sql_raw: &str, opts: &AuditOptions) -> Result<AuditReport> {
 
     let mut waterfall = Vec::new();
     let mut join_diagnostics = Vec::new();
+    let mut assertions_out = Vec::new();
+    let mut entity_traces = Vec::new();
     let mut spot_check = None;
     let mut final_row_count = None;
     let mut db_engine = None;
+
+    let mut all_assertions = rules.assertions.clone();
+    all_assertions.extend(opts.assertions.clone());
 
     if let Some(db_spec) = &opts.db {
         if db_spec.starts_with("postgres://") || db_spec.starts_with("postgresql://") {
@@ -208,8 +225,11 @@ pub fn audit_query(sql_raw: &str, opts: &AuditOptions) -> Result<AuditReport> {
                 sql,
                 query,
                 opts,
+                &all_assertions,
                 &mut waterfall,
                 &mut join_diagnostics,
+                &mut assertions_out,
+                &mut entity_traces,
                 &mut spot_check,
                 &mut final_row_count,
                 &mut findings,
@@ -230,8 +250,11 @@ pub fn audit_query(sql_raw: &str, opts: &AuditOptions) -> Result<AuditReport> {
                 sql,
                 query,
                 opts,
+                &all_assertions,
                 &mut waterfall,
                 &mut join_diagnostics,
+                &mut assertions_out,
+                &mut entity_traces,
                 &mut spot_check,
                 &mut final_row_count,
                 &mut findings,
@@ -300,6 +323,8 @@ pub fn audit_query(sql_raw: &str, opts: &AuditOptions) -> Result<AuditReport> {
         findings,
         waterfall,
         join_diagnostics,
+        assertions: assertions_out,
+        entity_traces,
         spot_check,
     })
 }
@@ -733,6 +758,7 @@ fn extract_first_eq_pair(expr: &Expr) -> Option<(String, String)> {
 
 struct ProbePlan {
     cte_prefix: String,
+    base_rel: Option<String>,
     cte_probes: Vec<(String, String)>, // (label, count_sql)
     base_probe: Option<(String, String)>,
     join_probes: Vec<JoinProbe>,
@@ -778,6 +804,7 @@ fn build_probe_plan(full_sql: &str, query: &Query, samples: usize) -> ProbePlan 
     };
 
     let mut base_probe = None;
+    let mut base_rel = None;
     let mut join_probes = Vec::new();
     let mut where_probe = None;
 
@@ -785,6 +812,7 @@ fn build_probe_plan(full_sql: &str, query: &Query, samples: usize) -> ProbePlan 
         && let Some(twj) = sel.from.first()
     {
         let base_sql = twj.relation.to_string();
+        base_rel = Some(base_sql.clone());
         let base_label = extract_table_name_alias(&twj.relation)
             .map(|(t, _)| t)
             .unwrap_or_else(|| base_sql.clone());
@@ -840,6 +868,7 @@ fn build_probe_plan(full_sql: &str, query: &Query, samples: usize) -> ProbePlan 
 
     ProbePlan {
         cte_prefix,
+        base_rel,
         cte_probes,
         base_probe,
         join_probes,
@@ -898,8 +927,11 @@ fn run_live_postgres(
     full_sql: &str,
     query: &Query,
     opts: &AuditOptions,
+    assertion_exprs: &[String],
     waterfall: &mut Vec<WaterfallStep>,
     join_diags: &mut Vec<LiveJoinDiag>,
+    assertions_out: &mut Vec<AssertionResult>,
+    entity_traces: &mut Vec<EntityTrace>,
     spot_check: &mut Option<SpotCheckSample>,
     final_row_count: &mut Option<i64>,
     findings: &mut Vec<AuditFinding>,
@@ -1139,6 +1171,30 @@ fn run_live_postgres(
         }
     }
 
+    let base_rows_opt = waterfall
+        .iter()
+        .find(|w| w.kind == "base")
+        .map(|w| w.row_count);
+    if !assertion_exprs.is_empty() {
+        *assertions_out = run_assertions_postgres(
+            &mut tx,
+            full_sql,
+            base_rows_opt,
+            fcnt,
+            assertion_exprs,
+            findings,
+        )?;
+    }
+    if let Some(tk) = &opts.trace_key {
+        *entity_traces = trace_entities_postgres(
+            &mut tx,
+            &plan.cte_prefix,
+            plan.base_rel.as_deref(),
+            full_sql,
+            tk,
+        )?;
+    }
+
     let _ = tx.rollback();
     Ok(())
 }
@@ -1149,8 +1205,11 @@ fn run_live_sqlite(
     full_sql: &str,
     query: &Query,
     opts: &AuditOptions,
+    assertion_exprs: &[String],
     waterfall: &mut Vec<WaterfallStep>,
     join_diags: &mut Vec<LiveJoinDiag>,
+    assertions_out: &mut Vec<AssertionResult>,
+    entity_traces: &mut Vec<EntityTrace>,
     spot_check: &mut Option<SpotCheckSample>,
     final_row_count: &mut Option<i64>,
     findings: &mut Vec<AuditFinding>,
@@ -1348,6 +1407,30 @@ fn run_live_sqlite(
             columns: cols,
             rows: out_rows,
         });
+    }
+
+    let base_rows_opt = waterfall
+        .iter()
+        .find(|w| w.kind == "base")
+        .map(|w| w.row_count);
+    if !assertion_exprs.is_empty() {
+        *assertions_out = run_assertions_sqlite(
+            conn,
+            full_sql,
+            base_rows_opt,
+            fcnt,
+            assertion_exprs,
+            findings,
+        )?;
+    }
+    if let Some(tk) = &opts.trace_key {
+        *entity_traces = trace_entities_sqlite(
+            conn,
+            &plan.cte_prefix,
+            plan.base_rel.as_deref(),
+            full_sql,
+            tk,
+        )?;
     }
 
     let _ = IndexMap::<String, ()>::new();

@@ -324,6 +324,86 @@ fix_hint = "Filter workflow_state = 'active' AND type = 'StudentEnrollment'"
     assert_eq!(vg["verdict"], "PASS");
     assert_eq!(vg["final_row_count"], 4);
     assert_eq!(vg["spot_check"]["rows"].as_array().unwrap().len(), 3);
+
+    // 3) v0.3.0 --assert accounting invariants + --trace-key end-to-end entity traces!
+    //    On bad_sql: `unique(person_id)` fails (Alice 1001 duplicated!), `final_rows == base_rows` fails (Dave 1004 dropped!),
+    //    and --trace-key person_id traces BOTH the fanout entity (1001) AND the dropped entity (1004)!
+    let trace_bad = statkeel()
+        .args([
+            "audit",
+            "--query",
+            bad_sql,
+            "--db",
+            &format!("sqlite://{}", db_path.display()),
+            "--assert",
+            "unique(person_id)",
+            "--assert",
+            "final_rows == base_rows",
+            "--trace-key",
+            "person_id",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let vtb: serde_json::Value = serde_json::from_slice(&trace_bad).unwrap();
+    let traces = vtb["entity_traces"].as_array().unwrap();
+    assert!(
+        traces
+            .iter()
+            .any(|t| t["key_value"] == "1004" && t["role"] == "dropped"),
+        "expected dropped trace for 1004 in {traces:?}"
+    );
+
+    //    On good_sql: ALL assertions pass (`unique(person_id)`, `final_rows == base_rows`, `not_null(name)`, `sum(credits) == 42`)!
+    let trace_good = statkeel()
+        .args([
+            "audit",
+            "--query",
+            good_sql,
+            "--db",
+            &format!("sqlite://{}", db_path.display()),
+            "--rules",
+            rules_path.to_str().unwrap(),
+            "--assert",
+            "unique(person_id)",
+            "--assert",
+            "final_rows == base_rows",
+            "--assert",
+            "not_null(name)",
+            "--assert",
+            "sum(credits) == 42",
+            "--trace-key",
+            "person_id",
+            "--html",
+            html_path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let vtg: serde_json::Value = serde_json::from_slice(&trace_good).unwrap();
+    assert_eq!(vtg["verdict"], "PASS");
+    assert_eq!(vtg["assertions"].as_array().unwrap().len(), 4);
+    assert!(
+        vtg["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["passed"] == true)
+    );
+    assert_eq!(vtg["entity_traces"].as_array().unwrap().len(), 3);
+    assert!(
+        std::fs::read_to_string(&html_path)
+            .unwrap()
+            .contains("End-to-End Entity Lineage Traces")
+    );
 }
 
 #[test]
